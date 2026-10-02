@@ -25,7 +25,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export interface StatusResponse {
-  gateway: boolean;
+  providerReady: boolean;
   skills: SkillItem[];
   personas: PersonaItem[];
 }
@@ -297,7 +297,7 @@ export function deleteOutput(path: string): Promise<{ ok: boolean; deleted: stri
 
 export interface UploadedFile { id: string; name: string; path: string; }
 
-/** OpenClaw ask_user 问答题（SSE question 事件 payload）。 */
+/** Easel ask_user 问答题（SSE question 事件 payload）。 */
 export interface ChatQuestionOption { label: string; description?: string; }
 export interface ChatQuestionItem {
   questionId: string;
@@ -307,12 +307,13 @@ export interface ChatQuestionItem {
   multiSelect?: boolean;
 }
 export interface ChatQuestion {
-  id: string;              // gateway question record id (ask_...)
+  id: string;              // Easel-owned question record id
+  sessionId?: string;
   questions: ChatQuestionItem[];
   expiresAtMs?: number;
 }
 export async function answerQuestion(
-  payload: { questionId: string; answers: Record<string, string[]>; resolvedBy?: string },
+  payload: { questionId: string; sessionId?: string; answers: Record<string, string[]>; resolvedBy?: string },
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(`${BASE}/api/chat/question/answer`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -324,13 +325,13 @@ export async function answerQuestion(
 
 /** 批量查 question 状态：过滤重放中已解决/已过期的旧题。 */
 export async function questionStatus(
-  questionIds: string[],
+  questionIds: string[], sessionId?: string,
 ): Promise<Record<string, { status: string }>> {
   if (!questionIds.length) return {};
   try {
     const res = await fetch(`${BASE}/api/chat/question/status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ questionIds }),
+      body: JSON.stringify({ questionIds, sessionId }),
     });
     const data = await res.json().catch(() => ({})) as { ok?: boolean; questions?: Record<string, { status: string }> };
     return data.questions || {};
@@ -815,44 +816,6 @@ export function runChannelSelftest(channel: string): Promise<{ channel: string; 
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel }),
-  });
-}
-
-export interface LocalAgentModel {
-  id: string;
-  name: string;
-  contextWindow?: number | null;
-}
-
-export interface LocalAgentInfo {
-  id: string;
-  label: string;
-  installed: boolean;
-  command: string;
-  path: string;
-  openclawProvider: string | null;
-  configProvider?: string | null;
-  supported: boolean;
-  configured: boolean;
-  usableWithoutKey: boolean;
-  loginHint: string;
-  models?: LocalAgentModel[];
-}
-
-export function fetchLocalAgents(): Promise<{
-  agents: LocalAgentInfo[];
-  installedCount: number;
-  usableWithoutKeyCount: number;
-  usableWithoutKey: string[];
-}> {
-  return request('/api/settings/local-agents');
-}
-
-export function enableLocalAgent(id: string, model = ''): Promise<{ ok: boolean; note: string; agent: LocalAgentInfo }> {
-  return request('/api/settings/local-agents/enable', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, model }),
   });
 }
 

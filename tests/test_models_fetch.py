@@ -39,6 +39,12 @@ def sandbox(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(ORIGINAL_ENV, encoding="utf-8")
     monkeypatch.setattr(web, "ENV_FILE", env_file)
+    from easel import native_settings
+    monkeypatch.setattr(native_settings, "STATE", tmp_path / ".easel")
+    native_settings.save_config({"primary": "openai", "providers": {
+        "openai": {"baseUrl": "https://api.openai.com/v1", "key": "sk-fak...test", "model": "gpt-4o", "protocol": "openai"},
+        "myproxy": {"baseUrl": "https://my.example.com/v1", "key": "sk-stored", "model": "m", "protocol": "openai"},
+    }})
     local = "http://127.0.0.1:7860"
     with TestClient(web.app, base_url=local, client=("127.0.0.1", 51234),
                     headers={"Origin": local}) as c:
@@ -143,15 +149,13 @@ def test_fetch_reuses_stored_key_when_draft_empty(sandbox, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["models"] == ["m1"]
     url, headers = capture[0]
-    # base 也回落到 .env 里的 OPENAI_BASE_URL
+    # base/key fall back to the isolated native Easel provider store.
     assert url == "https://api.openai.com/v1/models"
     assert headers.get("authorization") == "Bearer sk-fak...test"
 
 
 def test_fetch_custom_slot_uses_provider_name(sandbox, monkeypatch):
-    """自定义供应商：凭据按 provider 名从 openclaw.json 取。"""
-    monkeypatch.setattr(web, "_openclaw_provider_creds",
-                        lambda: {"myproxy": ("https://my.example.com/v1", "sk-stored")})
+    """Custom provider credentials are read from Easel's isolated native provider store."""
     capture: list = []
     _stub_opener(monkeypatch, json.dumps({"data": [{"id": "m2"}]}).encode(), capture)
     resp = sandbox.post("/api/settings/models/available",

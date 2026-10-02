@@ -4,7 +4,7 @@
 
 把宿主（Easel）与视频产线 SDK（独立接口）焊在一起的最小转发器：
 - 调用 SDK 的 pipeline/run.py（唯一入口，契约见 SDK 的 INTERFACE.md）
-- 运行态统一放 <base>/<时间戳>/（默认 <工作区>/outputs/视频产线）
+- 运行态统一放 <base>/<时间戳>/（默认 <Easel 项目>/outputs/视频产线）
 - 退出码透传：0 完成 ｜ 2 门失败 ｜ 3 待作答/待审批 ｜ 1 异常
 - 每个命令末行打印 `STATE: ...`（agent 用这一行判断下一步）
 
@@ -56,35 +56,13 @@ def find_sdk(args) -> Path:
     sys.exit(1)
 
 
-def _workspace_root() -> Path:
-    """agent 实际读写的 workspace。
-
-    不能写死：OpenClaw 的默认布局变过（2026.6.x 是 ~/.openclaw/workspace-easel，2026.9.x 起是
-    ~/.openclaw-easel/workspace）。写死其一，在另一个版本上产物就落进 agent 不读的目录，而
-    mkdir 照样成功、这里照样报路径 —— 用户只会发现「内容库里没有」（issue #19 的技能层版本）。
-    优先走 Easel 的统一解析器；本文件也会被同步进 workspace 单独跑，那时 import 不到，
-    退化成「两套布局里挑一个已经有东西的」，再不行才按新布局。
-    """
-    override = os.environ.get("EASEL_OPENCLAW_WORKSPACE")
-    if override:
-        return Path(override)
-    for root in (Path(__file__).resolve().parents[4], Path.cwd()):
-        if (root / "easel" / "openclaw_workspace.py").is_file():
-            try:
-                sys.path.insert(0, str(root))
-                from easel.openclaw_workspace import workspace_dir
-                return workspace_dir()
-            except Exception:  # noqa: BLE001 — 解析器不可用就退化，别把产线拖死
-                break
-    for cand in (Path.home() / ".openclaw-easel" / "workspace",
-                 Path.home() / ".openclaw" / "workspace-easel"):
-        if (cand / "skills").is_dir():
-            return cand
-    return Path.home() / ".openclaw-easel" / "workspace"
+def _easel_root() -> Path:
+    """Return the checkout root that owns this bundled skill."""
+    return Path(__file__).resolve().parents[4]
 
 
 def find_base(args) -> Path:
-    base = Path(args.base) if args.base else _workspace_root() / "outputs" / "视频产线"
+    base = Path(args.base) if args.base else _easel_root() / "outputs" / "视频产线"
     base.mkdir(parents=True, exist_ok=True)
     return base
 

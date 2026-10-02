@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="https://zju-real.github.io/Easel/"><img src="https://img.shields.io/badge/Easel-Project_Page-F05A3C?style=flat-square&logo=googlechrome&logoColor=white" alt="Easel Project Page"></a>
-  <img src="https://img.shields.io/badge/OpenClaw-powered-111827?style=flat-square" alt="Powered by OpenClaw">
+  <img src="https://img.shields.io/badge/native-agent-runtime-111827?style=flat-square" alt="Native agent runtime">
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
   <a href="docs/skill-function-mapping.md"><img src="https://img.shields.io/badge/Skills-113-0F9D8A?style=flat-square" alt="113 Skills"></a>
   <a href="https://github.com/ZJU-REAL/Easel/stargazers"><img src="https://img.shields.io/github/stars/ZJU-REAL/Easel?style=flat-square&color=F6C344" alt="GitHub Stars"></a>
@@ -41,15 +41,15 @@
 
 ## 🎨 What Is Easel?
 
-Easel is an open-source content workspace for social media creators. It connects an OpenClaw Agent, account profiles, content Skills, and real media tools, enabling the Agent to produce and archive content instead of merely explaining what to do, with direct or on-demand publishing when needed.
+Easel is an open-source content workspace for social media creators. It includes its own provider-backed text agent loop, account profiles, a library of content Skills, media utilities, and publishing workflows. The native agent can read Skills, create text artifacts, ask structured questions, and run a bounded novel-writer check; media generation and publishing remain user-operated workflows.
 
-Think of Easel as a content partner that remembers your positioning, audience, voice, platform constraints, preferences, and past performance. It stays with you from trend discovery through publishing, then carries what it learns into the next creation cycle.
+Use the Web workbench to manage accounts, content projects, publishing workflows, and profile data. The native text agent uses the selected profile and keeps its session history locally.
 
 Easel promotional demo:
 
 https://github.com/user-attachments/assets/4dd060dc-53dd-4bb2-99a3-e65ab6f65166
 
-Easel follows five connected workflows: **Discover** relevant trends and opportunities, **Plan** topics, hooks, scripts, and schedules, **Produce** text, audio, and video, **Publish** checked and platform-ready content directly to the appropriate platforms, and **Attribute** performance insights back to the account profile.
+Easel organizes its product experience around five connected workflows: **Discover** relevant trends and opportunities, **Plan** topics, hooks, scripts, and schedules, **Produce** text, audio, and video, **Publish** checked and platform-ready content directly to the appropriate platforms, and **Attribute** performance insights back to the account profile.
 
 #### 📌 Usage Notes and Research Vision
 
@@ -59,12 +59,12 @@ Easel follows five connected workflows: **Discover** relevant trends and opportu
 
 ## ✨ Why Easel?
 
-- **One Agent across the entire workflow:** discover trends, evaluate topics, plan calendars, generate copy and visuals, produce video, publish, and analyze results in one continuous flow.
+- **A native text agent:** read and follow content Skills, create non-overwriting text artifacts, retain session history, and use the selected profile.
 - **Profile-driven creation:** each account has its own positioning, style, audience, platforms, preferences, boundaries, and long-term memory.
-- **Executable Skills:** image, card, voice-over, subtitle, editing, short-drama, and publishing Skills include runnable tools and save deliverables to `outputs/`.
+- **A broad Skill library:** Easel includes writing, media, safety, and publishing guidance. Media-generation and publishing scripts remain direct user-operated workflows; the native text agent does not launch arbitrary skill scripts.
 - **One source, many platforms:** adapt a single idea into Xiaohongshu cards, short video, a Zhihu article, or a short post while respecting platform conventions.
 - **Project-based outputs:** source material, intermediate files, metadata, and final deliverables stay together for revision, retrying, and publishing.
-- **A publishing and learning loop:** Easel supports login, adaptation, and publishing workflows for Xiaohongshu, Douyin, Kuaishou, Zhihu, Bilibili, WeChat Channels, and WeChat Official Accounts, with performance data feeding back into account profiles.
+- **Workbench publishing and analytics:** the existing account, publishing, calendar, and analytics pages remain available separately from the text agent loop.
 
 ## 🧭 Five-Layer Content Workflow
 
@@ -164,7 +164,7 @@ For faster browsing, each cover opens a lightweight preview of up to one minute.
 Requirements: Linux or macOS, Python 3.10+, and Git. The installer checks Node.js 22.19+, FFmpeg, and Playwright/Chromium, and provides a platform-specific guide when Node.js is missing.
 
 ```bash
-git clone git@github.com:ZJU-REAL/Easel.git
+git clone https://github.com/ZJU-REAL/Easel.git
 cd Easel
 bash setup.sh
 source .venv/bin/activate    # easel is installed in .venv; activate it first (Windows: .venv\Scripts\activate)
@@ -174,15 +174,11 @@ easel web
 
 > If you see `easel: command not found`, the virtual environment is not activated. You can also run it by full path without activating, e.g. `.venv/bin/easel doctor` (Windows: `.venv\Scripts\easel.exe doctor`).
 
-`bash setup.sh` is a rerunnable guided installer. It detects and reuses an existing local OpenClaw
-installation without touching `~/.openclaw/`; Easel uses its isolated `~/.openclaw-easel/` profile.
-When an existing OpenClaw default model is found, the installer asks whether to reuse its model name.
-If no model is configured, it interactively asks for an Anthropic API key and model name. You may also
-copy `.env.example` and fill it in before running the installer.
+`bash setup.sh` is a rerunnable guided installer. It creates Easel’s local runtime and does not install, launch, or configure OpenClaw. Configure a chat provider in Web model settings, or set model environment variables in `.env` for CLI use. Optional media providers remain configurable through `.env.example`.
 
-Open `http://localhost:7860` for the Web workspace. Run `easel doctor` to check the environment and `easel ping` to verify the gateway and Agent connection.
+Open `http://localhost:7860` for the Web workspace. Run `easel doctor` to check the environment and `easel ping` to inspect local provider configuration.
 
-The installer installs the Python dependencies required by the Web UI, media processing, and browser publishing:
+The installer installs the Python dependencies used by the Web UI, local media tools, and browser workflows:
 
 ```bash
 pip install -e .
@@ -192,14 +188,9 @@ python -m playwright install chromium
 
 ## ⚙️ Configuration
 
-The minimum configuration is a usable LLM in the project-root `.env` file:
+Configure the chat provider in the Web model settings or Easel's local provider store:
 
-```bash
-ANTHROPIC_API_KEY=your_api_key
-CLAUDE_MODEL=anthropic/claude-sonnet-4-6
-```
-
-`.env.example` also documents optional video, music, voice, and Anthropic-compatible provider settings. Configure only the capabilities you use. Missing media-provider credentials do not prevent chat, planning, or text creation.
+The Web model settings store credentials in `~/.easel/providers.json` with owner-only file permissions. `.env.example` remains available for CLI bootstrap and optional media skills; it also documents video, music, and voice provider settings. Configure only the capabilities you use. Missing media-provider credentials do not prevent chat, planning, or text creation.
 
 | Capability | Configuration | Additional dependency |
 |---|---|---|
@@ -218,9 +209,9 @@ Never commit `.env`, cookies, or platform login state. Real publishing can be af
 | `easel web [--port 7860]` | Start the Web workspace |
 | `easel chat` | Start a multi-turn terminal conversation and select an account profile |
 | `easel skill <name> -i "..." [-p <profile>]` | Run a Skill directly; input may also be a file path |
-| `easel doctor` | Check Python, Node.js, OpenClaw, and essential configuration |
-| `easel ping` | Check the gateway and Agent connection |
-| `easel gateway start\|stop\|restart\|status\|logs` | Manage the OpenClaw gateway |
+| `easel doctor` | Check Python, Node.js, Skills, and essential configuration |
+| `easel ping` | Check local provider configuration |
+
 
 ```bash
 easel skill quality-gate -i "Review this social media post"
@@ -244,16 +235,16 @@ Profiles can also be created and edited from the Web workspace.
 Easel/
 ├── easel/                    Python CLI
 ├── web/                      FastAPI backend and React workspace
-├── skills/openclaw/          Discover, plan, produce, publish, and attribution Skills
+├── skills/openclaw/          Easel content Skills (legacy directory name)
 ├── skills/shared/            Shared scripts and references
 ├── assets/                   Brand, README media, and imported assets
 ├── profiles/                 Account profiles
 ├── outputs/                  Content projects and final deliverables
-├── openclaw/                 Isolated profile, workspace, and sync scripts
+├── prompts/                  Native system prompts
 └── docs/                     Specifications, capability map, and architecture docs
 ```
 
-Easel uses an isolated `easel` OpenClaw profile and does not overwrite an existing OpenClaw setup. The Web workspace defaults to port `7860`; the gateway port is chosen by OpenClaw (non-default profiles get a hashed port — `easel` → `37289`, not `18789`) and is resolved automatically by Easel.
+Easel does not depend on OpenClaw. The Web workspace listens on loopback at `127.0.0.1:7860` by default; set `EASEL_HOST` explicitly to select another interface. Model providers and session data live under `~/.easel/`. See the [native runtime guide](docs/native-runtime.md).
 
 ## 📑 Documentation
 
@@ -270,7 +261,7 @@ Ordered by priority — contributions welcome; feel free to claim or add items v
 - [ ] **1. Windows support** — Complete native Windows compatibility across installation, paths/encoding, and browser publishing.
 - [ ] **2. Simpler installation** — Lower the barrier to entry with fewer manual steps and a smoother one-click setup.
 - [ ] **3. Better in-app Agent UX** — Improve the Web workbench's chat interaction, loading logic, and streaming feedback.
-- [ ] **4. More Agent harnesses** — Support agent runtimes beyond OpenClaw, e.g. Claude Code, DeepSeek harness, Codex.
+- [ ] **4. More model providers and local runtimes** — Expand provider compatibility and offline options.
 
 ## 🙏 Acknowledgments
 

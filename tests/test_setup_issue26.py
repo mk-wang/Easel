@@ -49,7 +49,7 @@ def _slice(lines: list[str], start: str, end: str, *, keep_end: bool) -> str:
 def test_npm_registry_failure_does_not_abort_setup(tmp_path: Path) -> None:
     """npm 写 registry 失败时，脚本必须继续（带 warn），而不是无提示退出。"""
     lines = SETUP_SH.read_text(encoding="utf-8").splitlines()
-    block = _slice(lines, "# ---- 2. npm 源 ----", "# ---- 3. 检测/安装 OpenClaw", keep_end=False)
+    block = _slice(lines, "# ---- 2. npm 源 ----", "# ---- 3. Easel Python dependencies", keep_end=False)
 
     # 假的 npm：写 registry 一律失败（模拟 ~/.npmrc 跨会话不可写）。
     fake_npm = tmp_path / "npm"
@@ -76,7 +76,7 @@ def test_npm_registry_failure_does_not_abort_setup(tmp_path: Path) -> None:
 @needs_bash
 def test_npm_registry_success_still_reports_ok(tmp_path: Path) -> None:
     lines = SETUP_SH.read_text(encoding="utf-8").splitlines()
-    block = _slice(lines, "# ---- 2. npm 源 ----", "# ---- 3. 检测/安装 OpenClaw", keep_end=False)
+    block = _slice(lines, "# ---- 2. npm 源 ----", "# ---- 3. Easel Python dependencies", keep_end=False)
     script = textwrap.dedent("""
         set -euo pipefail
         info()  { echo "[easel] $*"; }
@@ -125,32 +125,23 @@ def _openai_models_written(tmp_path: Path, **env: str) -> str:
 
 
 @needs_bash
-def test_openai_models_declare_context_window_and_max_tokens(tmp_path: Path) -> None:
-    """P0-2：models[] 必须声明 maxTokens / contextWindow，否则部分网关 400。"""
-    raw = _openai_models_written(
-        tmp_path,
-        OPENAI_API_KEY="sk-real",
-        OPENAI_BASE_URL="https://api.deepseek.com/v1",
-        OPENAI_MODEL="deepseek-chat",
-        CLAUDE_MODEL="openai/deepseek-chat",
-    )
-    assert raw, "OpenAI provider 的 models 没有被写入"
-    assert '"contextWindow":128000' in raw
-    assert '"maxTokens":16384' in raw
+def test_openai_provider_environment_is_loaded_without_gateway_config(tmp_path, monkeypatch):
+    """The native provider receives the configured OpenAI-compatible model directly."""
+    from easel import native_settings
+    from easel.runtime import provider_config
+    monkeypatch.setattr(native_settings, "STATE", tmp_path / ".easel")
+    for key, value in {"OPENAI_API_KEY": "sk-real", "OPENAI_BASE_URL": "https://api.deepseek.com/v1", "OPENAI_MODEL": "deepseek-chat"}.items():
+        monkeypatch.setenv(key, value)
+    assert provider_config() == ("https://api.deepseek.com/v1", "sk-real", "deepseek-chat", "openai")
 
 
-@needs_bash
-def test_openai_models_respect_env_overrides(tmp_path: Path) -> None:
-    raw = _openai_models_written(
-        tmp_path,
-        OPENAI_API_KEY="sk-real",
-        OPENAI_BASE_URL="https://api.example.com/v1",
-        OPENAI_MODEL="my-model",
-        OPENAI_CONTEXT_WINDOW="64000",
-        OPENAI_MAX_TOKENS="8192",
-    )
-    assert '"contextWindow":64000' in raw
-    assert '"maxTokens":8192' in raw
+def test_openai_provider_environment_overrides_model(tmp_path, monkeypatch):
+    from easel import native_settings
+    from easel.runtime import provider_config
+    monkeypatch.setattr(native_settings, "STATE", tmp_path / ".easel")
+    for key, value in {"OPENAI_API_KEY": "sk-real", "OPENAI_BASE_URL": "https://api.example.com/v1", "OPENAI_MODEL": "my-model"}.items():
+        monkeypatch.setenv(key, value)
+    assert provider_config()[2] == "my-model"
 
 
 # ── ③ sync.sh：硬链接目标必须被替换 ──────────────────────────────

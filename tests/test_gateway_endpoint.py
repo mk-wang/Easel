@@ -312,16 +312,22 @@ def test_no_hardcoded_gateway_endpoint(rel):
 
 
 @pytest.mark.parametrize("rel,needle", [
-    ("web/app.py", "from easel.gateway_endpoint import"),
-    ("easel/commands/doctor.py", "from easel.gateway_endpoint import"),
-    ("easel/commands/ping.py", "from easel.gateway_endpoint import"),
+    ("web/app.py", ""),
+    ("easel/commands/doctor.py", "self-contained runtime"),
+    ("easel/commands/ping.py", "native runtime configuration"),
     ("scripts/gateway.sh", "resolve_gateway_port"),
     ("scripts/gateway.ps1", "Get-ConfiguredPort"),
     ("scripts/gateway.ps1", "Get-ProfilePort"),
 ])
 def test_port_comes_from_resolver(rel, needle):
-    """每个入口都必须真的去查端口，而不是自己造一个。"""
-    assert needle in (PROJECT_ROOT / rel).read_text(encoding="utf-8")
+    """Chat, doctor, and ping must no longer resolve or contact a gateway."""
+    text = (PROJECT_ROOT / rel).read_text(encoding="utf-8")
+    if rel in {"web/app.py", "easel/commands/doctor.py", "easel/commands/ping.py"}:
+        assert "from easel.gateway_endpoint import" not in text
+        if needle:
+            assert needle in text
+    else:
+        assert needle in text
 
 
 def test_gateway_ps1_resolution_order():

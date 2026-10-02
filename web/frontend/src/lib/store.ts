@@ -15,7 +15,7 @@ export interface ChatSession {
   messages: ChatMessage[];
   persona?: string;
   created: number;
-  sessionKey?: string;  // OpenClaw 的 session key，用于后端删除
+  sessionKey?: string;  // Easel 的 session key，用于后端删除
   pendingTurnId?: string; // 进行中的可重连 job；浏览器重开后继续按 eventId 续流
   archived?: boolean;   // 归档：从 History 主列表移到「已归档」区
 }
@@ -40,7 +40,7 @@ export interface PublishDraft {
 const PUBLISH_KEY = 'easel_publish_draft';
 const PREVIOUS_BRAND = ['post', 'craft'].join('');
 
-// One-time reset after clearing the server-side OpenClaw session store.
+// One-time reset after clearing the server-side Easel session store.
 const CHAT_RESET_KEY = 'easel_chat_reset_20260902';
 if (!localStorage.getItem(CHAT_RESET_KEY)) {
   for (const key of [

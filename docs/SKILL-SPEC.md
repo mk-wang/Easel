@@ -6,7 +6,7 @@
 
 ```
 skills/
-├── openclaw/              五层 SKILL（发现/策划/制作/发布/归因），由 OpenClaw 直接执行
+├── openclaw/              Easel 内容 SKILL（发现/策划/制作/发布/归因；目录名为历史兼容）
 └── shared/                跨 SKILL 共享工具（脚本、配置、依赖）
 ```
 
@@ -74,7 +74,7 @@ layer: discover / plan / produce / publish / attribute / general
 - 只保留 `name`、`description`、`layer` 三个常规字段，减少常驻路由上下文和无效元数据
 - `description` 是 Agent 的主要触发依据，必须用中文同时写清能力、触发场景/用户说法和相邻 SKILL 边界；可使用 YAML 块标量
 - `layer` 标明所属层：五个流水线层 `discover / plan / produce / publish / attribute`，外加 `general`（跨切面基础设施，如画像管理、产物管理、模板库——不属于任一流水线阶段）
-- 仅在 OpenClaw 需要判断操作系统、二进制、环境变量或安装方式时，允许增加 `metadata.openclaw` 运行时清单
+- 仅为尚未迁移的兼容性元数据保留 `metadata.openclaw`；新技能不得依赖此运行时清单
 - 禁止 `version`、`profile_aware`、`self_developed`、普通 `metadata.trigger/impl/source`、`allowed-tools`、`tags`；来源信息放 `EASEL-META.md`，执行约束和 Profile 行为写正文
 - SKILL.md 主体控制在 200 行以内
 
@@ -94,15 +94,15 @@ easel skill check-compliance -i "内容"
 easel skill check-compliance -i "内容" -p 画像名
 ```
 
-所有调用统一走 OpenClaw agent，由 OpenClaw 读对应 SKILL、按 AGENTS.md 规则自己执行。
+Easel 的原生 AgentRuntime 执行对话和 Skill 请求，通过受限工具读取技能指引、引用资料及项目文件。该运行时不要求安装 OpenClaw。
 
 ## SKILL 同步
 
-`openclaw/sync.sh` 把 `skills/openclaw/` 与 `skills/shared/` 同步到 `~/.openclaw/workspace-easel/`。
+原生运行时直接从仓库加载 `skills/openclaw/` 与 `skills/shared/`，无需同步到外部 agent workspace。
 
 ## Profile 注入
 
-- OpenClaw 直接读取 Profile 文件夹，按 AGENTS.md 凝练后用于产出。
+- Easel 从 `profiles/` 读取画像，并仅将所选画像加入对应会话上下文。
 - 检测标记：`=== EASEL ACCOUNT PROFILE ===`
 
 ## 产物管理
@@ -152,7 +152,7 @@ Schema：`{topic, profile, created, updated, title, summary, platform, kind, sta
 
 ## 出站内容安全闸门（发布/评论类 SKILL 契约）
 
-任何把文本**发到公开平台**的脚本（xhs/douyin/web_publisher/xhs_comment/zhihu_answer 等），在真发（`--exec`）前**必须**过 `skills/shared/scripts/content_guard.py` 的 `guard_or_die(...)`。**分两级**（见 `BLOCK_CATEGORIES`）：**BLOCK 级**=真·敏感信息（API key、内部 URL/域名、代理 IP、内部路径、env 名 + `.env` 真值）→ **fail-closed 退出码 7 阻止发布**；**WARN 级**=AI 措辞（由 AI 生成/OpenClaw/Claude/system prompt/大模型）与模型名（claude-*/gpt-image-2）→ 论文解读、AI 科普里可能是正常内容，**只提醒不拦截**。dry-run 全部只告警。放行硬拦须显式 `--allow-unsafe`。新增发布类脚本照此接入。
+任何把文本**发到公开平台**的脚本（xhs/douyin/web_publisher/xhs_comment/zhihu_answer 等），在真发（`--exec`）前**必须**过 `skills/shared/scripts/content_guard.py` 的 `guard_or_die(...)`。**分两级**（见 `BLOCK_CATEGORIES`）：**BLOCK 级**=真·敏感信息（API key、内部 URL/域名、代理 IP、内部路径、env 名 + `.env` 真值）→ **fail-closed 退出码 7 阻止发布**；**WARN 级**=AI 措辞（由 AI 生成/agent/Claude/system prompt/大模型）与模型名（claude-*/gpt-image-2）→ 论文解读、AI 科普里可能是正常内容，**只提醒不拦截**。dry-run 全部只告警。放行硬拦须显式 `--allow-unsafe`。新增发布类脚本照此接入。
 
 **有界编排约定**：manifest 只当**薄索引**（`summary` 一行给编排层路由 + `outputs[]` 指路径），**不复制内容**。跨层要传的东西分两类，都落 `outputs/<主题>/` 成文件，不留在对话里：
 - **产物（载荷）**：脚本/图/视频/文案 → 写文件，`--outputs` 指过去，下游按路径读全文。

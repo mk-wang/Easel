@@ -50,7 +50,7 @@ export default function App() {
   const [selectedPersona, setSelectedPersona] = useState('');
   const [sessions, setSessions] = useState<ChatSession[]>(() => loadSessions());
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [gatewayStatus, setGatewayStatus] = useState('connecting');
+  const [providerStatus, setProviderStatus] = useState('connecting');
   const [showRecommend, setShowRecommend] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -157,19 +157,19 @@ export default function App() {
     }
   }, [activeSessionId]);
 
-  // Fetch status on mount — 真实反映 gateway 状态 + 首次引导检测
+  // Fetch status on mount — 显示本地模型配置状态 + 首次引导检测
   useEffect(() => {
     fetchStatus()
       .then((data) => {
         setPersonas(data.personas || []);
-        setGatewayStatus(data.gateway ? 'connected' : 'disconnected');
+        setProviderStatus(data.providerReady ? 'connected' : 'disconnected');
         // 首次使用：没有任何个性化画像 且 未看过引导 → 推荐配置
         if ((data.personas || []).length === 0 && !onboardingSeen()) {
           setShowRecommend(true);
         }
       })
       .catch(() => {
-        setGatewayStatus('disconnected');
+        setProviderStatus('disconnected');
       });
   }, []);
 
@@ -264,7 +264,7 @@ export default function App() {
     });
     streamAcc.current[sessionId] = { content: '', thinking: '', steps: [], questions: [] };
     setStreams((prev) => ({ ...prev, [sessionId]: { content: '', thinking: '', activity: '', questions: [] } }));
-    // 打字机队列：流式事件按批到达（OpenClaw 攒批），前端按字符节奏显示，体验逐字浮现。
+    // 打字机队列：流式事件按批到达（AgentRuntime 按轮返回），前端按字符节奏显示，体验逐字浮现。
     typingBuf.current[sessionId] = '';
     startTypingPump(sessionId);
     streamCtl.current[sessionId] = streamChat(
@@ -276,7 +276,7 @@ export default function App() {
         ensureTypingPump(sessionId);
       },
       (sessionKey) => {
-        // done 不能立即 flush——token 和 done 几乎同时到达（OpenClaw 攒批），
+        // done 不能立即 flush——token 和 done 几乎同时到达（AgentRuntime 按轮返回），
         // 立即 flush 会把整包瞬间冲出，打字机白做。等队列吐完再落盘。
         const waitAndFinalize = () => {
           if (typingBuf.current[sessionId]) {
@@ -338,13 +338,14 @@ export default function App() {
         const a = streamAcc.current[sessionId]; if (!a) return;
         if (a.questions.some((x) => x.id === q.id)) return;
         if (answeredRef.current.has(q.id)) return;   // 本会话已答过：不再重现
-        void questionStatus([q.id]).then((st) => {
+        const sessionQuestion = { ...q, sessionId };
+        void questionStatus([q.id], sessionId).then((st) => {
           const s = st[q.id]?.status;
           // 只显示仍 pending 的：answered/expired/cancelled/not_found/unknown 一律过滤
           if (s && s !== 'pending' || answeredRef.current.has(q.id)) return;
           const a2 = streamAcc.current[sessionId]; if (!a2) return;
           if (a2.questions.some((x) => x.id === q.id)) return;
-          a2.questions.push(q);
+          a2.questions.push(sessionQuestion);
           setStreams((p) => (p[sessionId]
             ? { ...p, [sessionId]: { ...p[sessionId], questions: [...a2.questions] } } : p));
         });
@@ -444,16 +445,17 @@ export default function App() {
         const a = streamAcc.current[sessionId]; if (!a) return;
         if (a.questions.some((x) => x.id === q.id)) return;
         if (answeredRef.current.has(q.id)) return;   // 本会话已答过：不再重现
-        // 重放可能带已解决/已过期的旧问题（gateway 15s 后即清理）——先查状态只留 pending；
+        const sessionQuestion = { ...q, sessionId };
+        // 重放可能带已解决/已过期的旧问题——先查状态只留 pending；
         // 查询失败时保留原样（宁显示不丢题）。
-        void questionStatus([q.id]).then((st) => {
+        void questionStatus([q.id], sessionId).then((st) => {
           const s = st[q.id]?.status;
           // 只显示仍 pending 的：answered/expired/cancelled/not_found/unknown 一律过滤
-          //（unknown 通常=问题已从 gateway 清理，即已答或已过期，重放旧事件时不该重现）
+          //（unknown 通常=问题已从 本地问答记录清理，即已答或已过期，重放旧事件时不该重现）
           if (s && s !== 'pending' || answeredRef.current.has(q.id)) return;
           const a2 = streamAcc.current[sessionId]; if (!a2) return;
           if (a2.questions.some((x) => x.id === q.id)) return;
-          a2.questions.push(q);
+          a2.questions.push(sessionQuestion);
           setStreams((p) => (p[sessionId]
             ? { ...p, [sessionId]: { ...p[sessionId], questions: [...a2.questions] } } : p));
         });
@@ -615,7 +617,7 @@ export default function App() {
     try { sessionStorage.removeItem(`easel_pending_turn:${id}`); } catch { /* ignore */ }
 
     if (target?.sessionKey) {
-      // Do not delete OpenClaw's session record while its agent is still
+      // Do not delete the session transcript while its agent is still
       // writing to it; the stop endpoint waits for backend cleanup first.
       void stopped.then(() => deleteRemoteSession(target.sessionKey as string)).catch(() => {});
     }
@@ -684,7 +686,7 @@ export default function App() {
         return (
           <DashboardPage
             persona={selectedPersona}
-            gatewayStatus={gatewayStatus}
+            providerStatus={providerStatus}
             onNavigate={setCurrentPage}
             onUseTopic={handleUseTopic}
           />
@@ -780,7 +782,7 @@ export default function App() {
         onSessionRename={handleSessionRename}
         onSessionArchive={handleSessionArchive}
         onNewChat={handleNewChat}
-        gatewayStatus={gatewayStatus}
+        providerStatus={providerStatus}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <main className="main-content">

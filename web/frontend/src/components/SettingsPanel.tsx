@@ -4,10 +4,9 @@ import EnvBoard from './EnvBoard';
 import type { JobView } from './EnvBoard';
 import {
   fetchEnvTools, startEnvInstall, fetchEnvJob,
-  fetchModelChannels, runChannelSelftest, saveModelConfig,
-  fetchLocalAgents, enableLocalAgent, fetchAvailableModels,
+  fetchModelChannels, runChannelSelftest, saveModelConfig, fetchAvailableModels,
 } from '../lib/api';
-import type { EnvTool, ModelRow, SelftestResult, LocalAgentInfo } from '../lib/api';
+import type { EnvTool, ModelRow, SelftestResult } from '../lib/api';
 import { IconSlidersHorizontal, IconPackage, IconEllipsis } from './settingsIcons';
 
 interface Props { onClose: () => void; }
@@ -152,38 +151,8 @@ export default function SettingsPanel({ onClose }: Props) {
   const [selftest, setSelftest] = useState<{ testedAt: number; byBase: Record<string, SelftestResult> } | null>(null);
   const [testing, setTesting] = useState(false);
   const [selftestNote, setSelftestNote] = useState('');
-  // 本机 agent CLI（Claude Code / Gemini CLI…）：装了并登录过就免 API key
-  const [localAgents, setLocalAgents] = useState<LocalAgentInfo[]>([]);
-  const [localAgentsErr, setLocalAgentsErr] = useState('');
-  const [enabling, setEnabling] = useState('');
-  // 每个本机 agent 行上选中的模型（'' = 用该家默认）。
-  const [laModels, setLaModels] = useState<Record<string, string>>({});
-  const [localAgentNote, setLocalAgentNote] = useState('');
-
   // 拉取模型列表：{ 行号 → { loading, models, err } }
   const [modelLists, setModelLists] = useState<Record<number, { loading: boolean; models: string[]; err: string }>>({});
-
-  useEffect(() => {
-    let alive = true;
-    fetchWithRetry(() => fetchLocalAgents(), 3, 10000)
-      .then((d) => { if (alive) setLocalAgents(d.agents || []); })
-      .catch((e) => { if (alive) setLocalAgentsErr(e instanceof Error ? e.message : '探测失败'); });
-    return () => { alive = false; };
-  }, []);
-
-  const doEnableAgent = useCallback(async (id: string, model = '') => {
-    setEnabling(id);
-    setLocalAgentNote('');
-    try {
-      const d = await enableLocalAgent(id, model);
-      setLocalAgentNote(d.note || '已接入');
-      setLocalAgents((as) => as.map((a) => (a.id === id ? { ...a, configured: true } : a)));
-    } catch (e) {
-      setLocalAgentNote(e instanceof Error ? e.message : '接入失败');
-    } finally {
-      setEnabling('');
-    }
-  }, []);
 
   const pullModels = useCallback(async (i: number, r: ModelRow) => {
     setModelLists((m) => ({ ...m, [i]: { loading: true, models: m[i]?.models || [], err: '' } }));
@@ -546,63 +515,14 @@ export default function SettingsPanel({ onClose }: Props) {
                   <section className="st-panel active">
                     <div className="panel-top">
                       <span className={`pill ${chatOk ? 'ok' : 'off'}`}><span className="dot" />{chatOk ? '主通道在线' : '未配置'}</span>
-                      <span className="desc">经本地网关路由（主备自动降级）</span>
+                      <span className="desc">Easel 原生 AgentRuntime 调用已配置的模型服务</span>
                       {selftest && <span className="desc">上次自测 {hhmm(selftest.testedAt)}</span>}
                       <span className="spacer" />
                       <button className="btn btn-sm" onClick={() => void doSelftest('chat')} disabled={testing}>自测本通道</button>
                     </div>
                     {renderBoard(chatRows, { onRow: (i, p) => updateRow(setChatRows, i, p), onPrimary: setPrimaryRow, onRemove: removeRow })}
                     <div className="add-row" onClick={addProvider}>＋ 添加供应商（填名称 / 模型 / Base URL / Key；点「设为主」切换生效通道）</div>
-                    {(() => {
-                      // 本机 agent 区块：装了 Claude Code / Gemini CLI 并登录过的用户不需要填 API Key。
-                      // 只展示「已装」的行 —— 没装的用户看一眼全是灰的只会困惑。
-                      const shown = localAgents.filter((a) => a.installed);
-                      if (localAgentsErr) return <div className="foot-note">本机 agent 探测失败：{localAgentsErr}</div>;
-                      if (!shown.length) return null;
-                      const usable = shown.filter((a) => a.supported);
-                      return (
-                        <div className="local-agents">
-                          <div className="la-head">
-                            本机 Agent
-                            <span className="desc">
-                              {usable.length
-                                ? `检测到可免 API Key 使用：${usable.map((a) => a.label).join('、')}`
-                                : '检测到的 CLI 暂无底座后端，仍需填 API Key'}
-                            </span>
-                          </div>
-                          {shown.map((a) => (
-                            <div className="la-row" key={a.id}>
-                              <span className="la-name">{a.label}<small>{a.path || a.command}</small></span>
-                              <span className={`la-state ${a.configured ? 'ok' : a.supported ? 'todo' : 'na'}`}>
-                                {a.configured ? '已接入' : a.supported ? '可接入' : '不支持'}
-                              </span>
-                              {a.supported && !a.configured && (a.models?.length ?? 0) > 0 && (
-                                <select
-                                  className="la-model"
-                                  value={laModels[a.id] ?? ''}
-                                  onChange={(e) => setLaModels((m) => ({ ...m, [a.id]: e.target.value }))}
-                                >
-                                  <option value="">默认模型</option>
-                                  {(a.models ?? []).map((m) => (
-                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                  ))}
-                                </select>
-                              )}
-                              {a.supported && !a.configured ? (
-                                <button
-                                  className="btn btn-sm"
-                                  disabled={enabling === a.id}
-                                  onClick={() => void doEnableAgent(a.id, laModels[a.id] ?? '')}
-                                >{enabling === a.id ? '接入中…' : '一键接入'}</button>
-                              ) : <span />}
-                              <span className="la-hint">{a.loginHint}</span>
-                            </div>
-                          ))}
-                          {localAgentNote && <div className="foot-note">{localAgentNote}</div>}
-                        </div>
-                      );
-                    })()}
-                    <div className="foot-note">改完点右上角「保存配置」（key 留空=不改）；自动降级链随统一网关接入开放。</div>
+                    <div className="foot-note">改完点右上角「保存配置」（key 留空=不改）。</div>
                   </section>
                 )}
 
@@ -651,7 +571,7 @@ export default function SettingsPanel({ onClose }: Props) {
                       <span className="spacer" />
                     </div>
                     {renderBoard(mediaRows.video || [], { onRow: (i, p) => updateMediaRow('video', i, p), onPrimary: (i) => setMediaPrimary('video', i), media: true })}
-                    <div className="foot-note">脚本按「主」provider 出片；同类多家的自动降级随统一网关接入开放。</div>
+                    <div className="foot-note">技能脚本按所选 provider 配置运行。</div>
                   </section>
                 )}
 
@@ -694,7 +614,6 @@ export default function SettingsPanel({ onClose }: Props) {
                   <span className="desc">同一个面板，以后放更多设置</span>
                 </div>
                 <div className="board">
-                  <div className="stub-row"><span className="tag2">预留</span>网关参数（端口 / 绑定 / 会话）<span className="future">就挂在这页旁边</span></div>
                   <div className="stub-row"><span className="tag2">预留</span>通用设置（语言 / 更新 / 数据目录）<span className="future">按需加</span></div>
                 </div>
                 <div className="foot-note">扩展方式：在这个面板里加标签即可——模型、环境已各就位，其余按需加。</div>
@@ -704,7 +623,7 @@ export default function SettingsPanel({ onClose }: Props) {
         </div>
 
         <div className="settings-foot">
-          ⓘ 环境安装在后台执行，装完自动回写状态；模型配置保存写入 .env（对话经本地网关路由，主备自动降级）。
+          ⓘ 环境安装在后台执行，装完自动回写状态；聊天模型凭据保存在 ~/.easel/providers.json；媒体技能配置保存在项目 .env。
         </div>
       </div>
     </div>

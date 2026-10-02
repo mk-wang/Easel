@@ -499,65 +499,35 @@ def test_missing_job_stream_fails_promptly(tmp_path, monkeypatch):
     assert exc.value.status_code == 404
 
 
-def test_chat_stop_waits_for_process_and_supervisor_cleanup():
-    class FakeProcess:
-        def __init__(self):
-            self.returncode = None
-            self.terminated = False
-
-        def poll(self):
-            return self.returncode
-
-        def terminate(self):
-            self.terminated = True
-
-        def wait(self, timeout=None):
-            self.returncode = -15
-            return self.returncode
-
+def test_chat_stop_sets_native_runtime_cancel_flag():
+    class CancelFlag:
+        def __init__(self): self.cancelled = False
+        def set(self): self.cancelled = True
     async def scenario():
         session_id = "stop-cleanup-test"
-        proc = FakeProcess()
-        web._RUNNING_CHAT[session_id] = proc
-
-        async def finish_supervisor():
-            while not proc.terminated:
-                await asyncio.sleep(0)
-            web._RUNNING_CHAT.pop(session_id, None)
-
-        cleanup = asyncio.create_task(finish_supervisor())
+        flag = CancelFlag(); web._RUNNING_CHAT[session_id] = flag
         result = await web.api_chat_stop(web.StopRequest(sessionId=session_id))
-        await cleanup
-        web._STOPPED_CHAT.discard(session_id)
-        return result, proc
-
-    result, proc = asyncio.run(scenario())
+        web._RUNNING_CHAT.pop(session_id, None)
+        return result, flag
+    result, flag = asyncio.run(scenario())
     assert result == {"stopped": True}
-    assert proc.terminated and proc.poll() == -15
+    assert flag.cancelled
 
 
-def test_raw_stream_events_are_isolated_by_run_id():
-    # 共享 raw 流里事件带 runId（无 sessionId）：本轮闩锁自己的 runId 后，别的 run 的事件被拒。
-    own = json.dumps({
-        "event": "assistant_text_stream", "evtType": "text_delta",
-        "runId": "run-a", "delta": "自己的回答",
-    })
-    foreign = json.dumps({
-        "event": "assistant_thinking_stream", "evtType": "thinking_delta",
-        "runId": "run-b", "delta": "其他会话的思考",
-    })
 
-    assert web._raw_event_for_run(own, "run-a")["delta"] == "自己的回答"
-    assert web._raw_event_for_run(foreign, "run-a") is None
-
-
-def test_raw_stream_parser_accepts_events_before_run_is_latched():
-    # expected_run_id=None = 本轮尚未闩锁 → 先放行，调用方据此从 event['runId'] 闩锁。
-    ev = json.dumps({
-        "event": "assistant_text_stream", "evtType": "text_delta",
-        "runId": "run-a", "delta": "首个事件",
-    })
-    assert web._raw_event_for_run(ev, None)["delta"] == "首个事件"
+def test_native_sessions_are_profile_scoped(tmp_path, monkeypatch):
+    from easel import runtime
+    monkeypatch.setattr(runtime, "STATE", tmp_path)
+    responses = iter([
+        {"choices": [{"message": {"role": "assistant", "content": "A", "tool_calls": []}}]},
+        {"choices": [{"message": {"role": "assistant", "content": "B", "tool_calls": []}}]},
+    ])
+    agent = runtime.AgentRuntime(request=lambda **_: next(responses))
+    list(agent.run("one", "shared", "profile-a"))
+    list(agent.run("two", "shared", "profile-b"))
+    a = runtime._session_file("shared-profile-profile-a")
+    b = runtime._session_file("shared-profile-profile-b")
+    assert a.is_file() and b.is_file() and a != b
 
 
 # ---- Gemini 适配器：流式端点改写 + finishReason 归一 ----

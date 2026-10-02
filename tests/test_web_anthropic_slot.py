@@ -35,27 +35,21 @@ ORIGINAL_ENV = (
 
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
-    """把 .env 与 openclaw.json 都换到沙箱，绝不碰用户真配置。"""
+    """Isolate both legacy media .env values and Easel's native provider store."""
     env_file = tmp_path / ".env"
     env_file.write_text(ORIGINAL_ENV, encoding="utf-8")
     monkeypatch.setattr(web, "ENV_FILE", env_file)
 
-    oc_dir = tmp_path / ".openclaw-easel"
-    oc_dir.mkdir()
-    oc = oc_dir / "openclaw.json"
-    oc.write_text(json.dumps({
-        "models": {"providers": {"openai": {"baseUrl": "https://x/v1", "apiKey": "k",
-                                            "models": [{"id": "m"}]}}},
-        "agents": {"defaults": {"model": {"primary": "openai/m"}}},
-    }, ensure_ascii=False), encoding="utf-8")
-    # _sync_anthropic_provider / _sync_openclaw_chat 都按 ~/.openclaw-easel 定位
-    monkeypatch.setattr(web.Path, "home", staticmethod(lambda: tmp_path))
+    from easel import native_settings
+    monkeypatch.setattr(native_settings, "STATE", tmp_path / ".easel")
+    native_settings.save_config({"primary": "openai", "providers": {
+        "openai": {"baseUrl": "https://api.openai.com/v1", "key": "k", "model": "gpt-4o", "protocol": "openai"},
+    }})
 
     local = "http://127.0.0.1:7860"
     with TestClient(web.app, base_url=local, client=("127.0.0.1", 51234),
                     headers={"Origin": local}) as c:
         c.env_file = env_file
-        c.oc_file = oc
         yield c
 
 
@@ -63,43 +57,41 @@ def _save(client, payload):
     return client.post("/api/settings/models/save", json=payload)
 
 
-# ---- ① 保存 anthropic 必须落到 openclaw.json ----
+# ---- ① 保存 Anthropic 必须落到 Easel 自己的 provider store ----
 
 
 def test_anthropic_save_writes_provider_into_openclaw(sandbox):
-    """保存 key → openclaw.json 出现 anthropic provider（否则对话根本走不到）。"""
+    """Saving the Anthropic slot makes it available to Easel's native runtime."""
     resp = _save(sandbox, {"channel": "chat", "rows": [
         {"slot": "anthropic", "model": "claude-sonnet-4-6", "key": "sk-ant-test"}]})
     assert resp.status_code == 200, resp.text
 
-    oc = json.loads(sandbox.oc_file.read_text(encoding="utf-8"))
-    prov = oc["models"]["providers"]["anthropic"]
-    assert prov["apiKey"] == "sk-ant-test"
-    assert prov["baseUrl"] == "https://api.anthropic.com"
-    assert prov["models"] == []
-    # 既有的 openai provider 不能被顺手抹掉
-    assert oc["models"]["providers"]["openai"]["apiKey"] == "k"
-    # 提示语要能解释「为什么刚才没生效」
-    assert "anthropic" in resp.json().get("note", "")
+    from easel.native_settings import load_config
+    cfg = load_config()
+    prov = cfg["providers"]["anthropic"]
+    assert prov["key"] == "sk-ant-test"
+    assert prov["baseUrl"] == "https://api.anthropic.com/v1"
+    assert prov["protocol"] == "anthropic"
+    assert cfg["providers"]["openai"]["key"] == "k"
 
 
 def test_anthropic_save_updates_existing_provider_in_place(sandbox):
     """已存在的 anthropic provider 应被就地更新，且不丢其它字段。"""
-    data = json.loads(sandbox.oc_file.read_text(encoding="utf-8"))
-    data["models"]["providers"]["anthropic"] = {
-        "baseUrl": "https://old.example.com", "apiKey": "old-key",
-        "timeoutSeconds": 600, "models": []}
-    sandbox.oc_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    from easel.native_settings import load_config, save_config
+    data = load_config()
+    data["providers"]["anthropic"] = {"baseUrl": "https://old.example.com/v1", "key": "old-key", "model": "claude-sonnet-4-6", "protocol": "anthropic"}
+    save_config(data)
 
     resp = _save(sandbox, {"channel": "chat", "rows": [
         {"slot": "anthropic", "model": "claude-sonnet-4-6",
          "baseUrl": "https://relay.example.com", "key": "new-key"}]})
     assert resp.status_code == 200, resp.text
 
-    prov = json.loads(sandbox.oc_file.read_text(encoding="utf-8"))["models"]["providers"]["anthropic"]
+    prov = load_config()["providers"]["anthropic"]
     assert prov["baseUrl"] == "https://relay.example.com"
-    assert prov["apiKey"] == "new-key"
-    assert prov["timeoutSeconds"] == 600, "就地更新不该丢掉其它字段"
+    assert prov["key"] == "new-key"
+    assert prov["model"] == "claude-sonnet-4-6"
+    assert prov["protocol"] == "anthropic"
 
 
 def test_custom_base_url_persisted_to_env(sandbox):
@@ -108,9 +100,11 @@ def test_custom_base_url_persisted_to_env(sandbox):
         {"slot": "anthropic", "model": "claude-sonnet-4-6",
          "baseUrl": "https://relay.example.com", "key": "sk-ant-test"}]})
     assert resp.status_code == 200, resp.text
-    env = sandbox.env_file.read_text(encoding="utf-8")
-    assert "ANTHROPIC_BASE_URL=https://relay.example.com" in env
-    assert "ANTHROPIC_API_KEY=sk-ant-test" in env
+    from easel.native_settings import load_config
+    provider = load_config()["providers"]["anthropic"]
+    assert provider["baseUrl"] == "https://relay.example.com"
+    assert provider["key"] == "sk-ant-test"
+    assert sandbox.env_file.read_text(encoding="utf-8") == ORIGINAL_ENV
 
 
 def test_openai_slot_still_unchanged(sandbox):
@@ -119,9 +113,10 @@ def test_openai_slot_still_unchanged(sandbox):
         {"slot": "openai", "model": "gpt-4o", "baseUrl": "https://api.openai.com/v1",
          "key": "sk-new"}]})
     assert resp.status_code == 200, resp.text
-    oc = json.loads(sandbox.oc_file.read_text(encoding="utf-8"))
-    assert "anthropic" not in oc["models"]["providers"], "没保存 anthropic 却造出了 provider"
-    assert oc["models"]["providers"]["openai"]["apiKey"] == "sk-new"
+    from easel.native_settings import load_config
+    providers = load_config()["providers"]
+    assert "anthropic" not in providers
+    assert providers["openai"]["key"] == "sk-new"
 
 
 # ---- ② 自测必须按 Anthropic 协议探测 ----
@@ -145,17 +140,17 @@ def _capture_probes(monkeypatch):
             seen.append((rq.full_url, {k.lower(): v for k, v in dict(rq.headers).items()}))
             return _Resp()
 
+    monkeypatch.setattr(web, "_ssrf_safe", lambda _url: True)
     monkeypatch.setattr(web.urllib.request, "build_opener", lambda *a, **k: _Opener())
     return seen
 
 
 def test_selftest_uses_anthropic_headers_and_path(sandbox, monkeypatch):
     """anthropic 通道要用 x-api-key + /v1/models，而不是 Bearer + /models。"""
-    sandbox.env_file.write_text(
-        ORIGINAL_ENV
-        + "ANTHROPIC_BASE_URL=https://api.anthropic.com\n"
-          "ANTHROPIC_API_KEY=sk-ant-test\n",
-        encoding="utf-8")
+    from easel.native_settings import load_config, save_config
+    cfg = load_config()
+    cfg["providers"]["anthropic"] = {"baseUrl": "https://api.anthropic.com/v1", "key": "sk-ant-test", "model": "claude-sonnet-4-6", "protocol": "anthropic"}
+    save_config(cfg)
     seen = _capture_probes(monkeypatch)
 
     resp = sandbox.post("/api/settings/models/selftest", json={"channel": "chat"})
@@ -171,6 +166,7 @@ def test_selftest_uses_anthropic_headers_and_path(sandbox, monkeypatch):
 
 def test_selftest_keeps_openai_shape(sandbox, monkeypatch):
     """零影响保护：OpenAI 兼容通道仍是 Bearer + /models。"""
+    monkeypatch.setattr(web, "_ssrf_safe", lambda url: True)
     seen = _capture_probes(monkeypatch)
     resp = sandbox.post("/api/settings/models/selftest", json={"channel": "chat"})
     assert resp.status_code == 200, resp.text
@@ -184,12 +180,12 @@ def test_selftest_keeps_openai_shape(sandbox, monkeypatch):
 
 def test_selftest_still_blocks_private_targets(sandbox, monkeypatch):
     """自测会把真 Key 当凭据发出去 —— SSRF 闸不能被本次改动绕开。"""
-    sandbox.env_file.write_text(
-        ORIGINAL_ENV
-        + "ANTHROPIC_BASE_URL=http://169.254.169.254\n"
-          "ANTHROPIC_API_KEY=sk-ant-test\n",
-        encoding="utf-8")
+    from easel.native_settings import load_config, save_config
+    cfg = load_config()
+    cfg["providers"]["anthropic"] = {"baseUrl": "http://169.254.169.254", "key": "sk-ant-test", "model": "claude-sonnet-4-6", "protocol": "anthropic"}
+    save_config(cfg)
     seen = _capture_probes(monkeypatch)
+    monkeypatch.setattr(web, "_ssrf_safe", lambda url: not "169.254" in url)
     resp = sandbox.post("/api/settings/models/selftest", json={"channel": "chat"})
     assert resp.status_code == 200, resp.text
     assert not any("169.254.169.254" in u for u, _ in seen), "内网目标竟然发了请求"

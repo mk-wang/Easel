@@ -56,22 +56,17 @@ def test_config_path_respects_state_dir_override(tmp_path, monkeypatch):
     assert ws.state_dir() == tmp_path
 
 
-def test_sync_writes_via_state_dir_override(tmp_path, monkeypatch):
-    """端到端：设了 EASEL_OPENCLAW_STATE_DIR 后，保存操作只写沙箱里的 openclaw.json。"""
+def test_native_model_save_uses_easel_state_and_leaves_openclaw_file_untouched(tmp_path, monkeypatch):
+    """Native chat settings must be isolated from any prior OpenClaw state directory."""
     from starlette.testclient import TestClient
+    from easel import native_settings
 
-    monkeypatch.setenv("EASEL_OPENCLAW_STATE_DIR", str(tmp_path))
+    native_dir = tmp_path / ".easel"
+    monkeypatch.setattr(native_settings, "STATE", native_dir)
     oc = tmp_path / "openclaw.json"
-    oc.write_text(json.dumps({
-        "models": {"providers": {"openai": {
-            "baseUrl": "https://user-real.example.com", "apiKey": "user-real-key",
-            "models": [{"id": "user-model"}]}}},
-        "agents": {"defaults": {"model": {"primary": "openai/user-model"}}},
-    }, ensure_ascii=False), encoding="utf-8")
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("OPENAI_API_KEY=k\nOPENAI_BASE_URL=https://api.openai.com/v1\n", encoding="utf-8")
-    monkeypatch.setattr(web, "ENV_FILE", env_file)
+    original = json.dumps({"models": {"providers": {"openai": {
+        "baseUrl": "https://user-real.example.com", "apiKey": "user-real-key"}}}}, ensure_ascii=False)
+    oc.write_text(original, encoding="utf-8")
 
     local = "http://127.0.0.1:7860"
     with TestClient(web.app, base_url=local, client=("127.0.0.1", 51234),
@@ -81,7 +76,7 @@ def test_sync_writes_via_state_dir_override(tmp_path, monkeypatch):
              "baseUrl": "https://api.openai.com/v1", "key": "sk-fresh", "primary": True}]})
     assert resp.status_code == 200, resp.text[:300]
 
-    data = json.loads(oc.read_text(encoding="utf-8"))
-    prov = data["models"]["providers"]["openai"]
-    assert prov["apiKey"] == "sk-fresh"        # 写进了沙箱
-    assert data["agents"]["defaults"]["model"]["primary"] == "openai/gpt-4o-mini"
+    saved = json.loads(native_settings.config_path().read_text(encoding="utf-8"))
+    assert saved["providers"]["openai"]["key"] == "sk-fresh"
+    assert saved["primary"] == "openai"
+    assert oc.read_text(encoding="utf-8") == original
