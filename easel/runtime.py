@@ -1,6 +1,6 @@
 """OpenClaw-independent Easel text agent runtime with bounded tools."""
 from __future__ import annotations
-import json, os, re, shutil, subprocess, sys, threading, time
+import contextvars, json, os, re, shutil, subprocess, sys, threading, time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 import httpx
@@ -12,6 +12,9 @@ STATE = Path(os.environ.get("EASEL_STATE_DIR", Path.home() / ".easel"))
 MAX_RESULT = 32000
 
 class RuntimeErrorBase(RuntimeError):
+    pass
+
+class RequestBudgetExceeded(RuntimeErrorBase):
     pass
 
 def _safe_under(root: Path, relative: str) -> Path:
@@ -254,13 +257,73 @@ def _system_prompt(persona):
     return "\n\n".join(parts)
 
 class AgentRuntime:
-    def __init__(self, request: Callable[..., Any] | None = None, max_steps=12): self.request=request; self.max_steps=max_steps
+    def __init__(self, request: Callable[..., Any] | None = None, max_steps=12,
+                 max_completion_tokens=512, max_total_input_tokens=300000,
+                 max_total_output_tokens=2048):
+        self.request=request
+        self.max_steps=max(1, min(int(max_steps), 12))
+        self.max_completion_tokens=max(1, min(int(max_completion_tokens), 2048))
+        self.max_total_input_tokens=max(1, min(int(max_total_input_tokens), 400000))
+        self.max_total_output_tokens=max(1, min(int(max_total_output_tokens), 8192))
+        self._request_budget=contextvars.ContextVar(f"easel_request_budget_{id(self)}", default=None)
     def _tool_schemas(self, profile_edit=None): return tool_schemas(profile_edit=bool(getattr(self, "_allow_profile_edit", False)) if profile_edit is None else profile_edit, script_execution=bool(getattr(self, "_allow_script_execution", True)))
+
+    @staticmethod
+    def _input_token_upper_bound(payload: bytes) -> int:
+        # The serialized UTF-8 request includes all message/tool text. Four tokens
+        # per byte plus fixed framing headroom is deliberately conservative.
+        return len(payload) * 4 + 256
+
+    @staticmethod
+    def _completion_token_upper_bound(message) -> int:
+        # Used only by injected test/mock providers that omit usage metadata.
+        encoded=json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return len(encoded) + 64
+
+    def _budget_request(self, body, token_parameter=None):
+        budget=self._request_budget.get()
+        remaining=(self.max_total_output_tokens-budget["output_tokens"]) if budget is not None else self.max_total_output_tokens
+        if remaining <= 0:
+            raise RequestBudgetExceeded("本轮输出预算已用尽，后续模型请求未发送。")
+        completion_limit=min(self.max_completion_tokens, remaining)
+        if token_parameter:
+            body[token_parameter]=completion_limit
+        payload=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        input_bound=self._input_token_upper_bound(payload)
+        if budget is not None and budget["input_tokens"] + input_bound > self.max_total_input_tokens:
+            raise RequestBudgetExceeded("本轮输入预算已用尽，后续模型请求未发送。")
+        if budget is not None:
+            budget["input_tokens"] += input_bound
+        return payload, completion_limit
+
+    def _record_response_budget(self, response, completion_limit):
+        budget=self._request_budget.get()
+        if budget is None: return
+        try:
+            message=response["choices"][0]["message"]
+            usage=response.get("usage") or {}
+            completion=int(usage.get("completion_tokens")) if usage.get("completion_tokens") is not None else self._completion_token_upper_bound(message)
+        except (KeyError, IndexError, TypeError, ValueError):
+            completion=completion_limit
+        if completion > completion_limit:
+            raise RequestBudgetExceeded("模型响应超过请求输出上限，本轮已停止后续调用。")
+        budget["output_tokens"] += completion
+
     def _request(self, messages):
-        if self.request: return self.request(messages=messages,tools=self._tool_schemas())
+        tools=self._tool_schemas()
+        if self.request:
+            body={"messages":messages,"tools":tools}
+            _, completion_limit=self._budget_request(body)
+            response=self.request(messages=messages,tools=tools)
+            self._record_response_budget(response, completion_limit)
+            return response
         base,key,model,protocol=provider_config()
         if protocol == "openai":
-            r=httpx.post(base+"/chat/completions",json={"model":model or "gpt-4o","messages":messages,"tools":self._tool_schemas(),"tool_choice":"auto"},headers={"Authorization":f"Bearer {key}"},timeout=180); r.raise_for_status(); return r.json()
+            body={"model":model or "gpt-4o","messages":messages,"tools":tools,"tool_choice":"auto"}
+            payload, completion_limit=self._budget_request(body, "max_completion_tokens")
+            r=httpx.post(base+"/chat/completions",content=payload,headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},timeout=180); r.raise_for_status(); response=r.json()
+            self._record_response_budget(response, completion_limit)
+            return response
         system=next((m["content"] for m in messages if m["role"]=="system"),""); converted=[]
         for m in messages:
             if m["role"]=="system": continue
@@ -268,23 +331,29 @@ class AgentRuntime:
             elif m["role"]=="assistant" and m.get("tool_calls"):
                 converted.append({"role":"assistant","content":[{"type":"tool_use","id":c["id"],"name":c["function"]["name"],"input":json.loads(c["function"]["arguments"])} for c in m["tool_calls"]]})
             else: converted.append({"role":m["role"],"content":m["content"]})
-        tools=[{"name":t["function"]["name"],"description":t["function"]["description"],"input_schema":t["function"]["parameters"]} for t in self._tool_schemas()]
-        r=httpx.post(base+"/messages",json={"model":model,"max_tokens":8192,"system":system,"messages":converted,"tools":tools},headers={"x-api-key":key,"anthropic-version":os.getenv("EASEL_LLM_ANTHROPIC_VERSION","2023-06-01")},timeout=180); r.raise_for_status(); raw=r.json()
+        anthropic_tools=[{"name":t["function"]["name"],"description":t["function"]["description"],"input_schema":t["function"]["parameters"]} for t in tools]
+        body={"model":model,"system":system,"messages":converted,"tools":anthropic_tools}
+        payload, completion_limit=self._budget_request(body, "max_tokens")
+        r=httpx.post(base+"/messages",content=payload,headers={"x-api-key":key,"anthropic-version":os.getenv("EASEL_LLM_ANTHROPIC_VERSION","2023-06-01"),"Content-Type":"application/json"},timeout=180); r.raise_for_status(); raw=r.json()
         calls=[]; text=[]
         for b in raw.get("content",[]):
             if b.get("type")=="text": text.append(b.get("text",""))
             elif b.get("type")=="tool_use": calls.append({"id":b["id"],"type":"function","function":{"name":b["name"],"arguments":json.dumps(b.get("input",{}))}})
-        return {"choices":[{"message":{"role":"assistant","content":"".join(text),"tool_calls":calls}}]}
+        response={"choices":[{"message":{"role":"assistant","content":"".join(text),"tool_calls":calls}}],"usage":{"completion_tokens":int((raw.get("usage") or {}).get("output_tokens", completion_limit))}}
+        self._record_response_budget(response, completion_limit)
+        return response
     def run(self,message,session_id="default",persona=None,cancel_event=None,allow_profile_edit=False,allow_script_execution=True)->Iterator[dict[str,str]]:
         scoped_id = session_id if not persona else f"{session_id}-profile-{persona}"
         with _session_lock(scoped_id):
             self._allow_profile_edit = bool(allow_profile_edit)
             self._allow_script_execution = bool(allow_script_execution)
+            budget_token=self._request_budget.set({"input_tokens":0,"output_tokens":0})
             try:
                 yield from self._run_session(message, session_id, persona, cancel_event, scoped_id, allow_profile_edit)
             finally:
                 self._allow_profile_edit = False
                 self._allow_script_execution = True
+                self._request_budget.reset(budget_token)
 
     def _run_session(self, message, session_id, persona, cancel_event, scoped_id, allow_profile_edit=False):
         history=_load(scoped_id)
@@ -294,7 +363,13 @@ class AgentRuntime:
             if cancel_event is not None and cancel_event.is_set():
                 answer="本轮已停止。"; history.append({"role":"assistant","content":answer}); _save(scoped_id,history)
                 yield {"event":"token","data":answer}; yield {"event":"done","data":session_id}; return
-            msg=self._request(history)["choices"][0]["message"]; calls=msg.get("tool_calls") or []
+            try:
+                msg=self._request(history)["choices"][0]["message"]
+            except RequestBudgetExceeded as exc:
+                answer=f"{exc}"
+                history.append({"role":"assistant","content":answer}); _save(scoped_id,history)
+                yield {"event":"token","data":answer}; yield {"event":"done","data":session_id}; return
+            calls=msg.get("tool_calls") or []
             if not calls:
                 answer=msg.get("content") or ""; history.append({"role":"assistant","content":answer}); _save(scoped_id,history)
                 if answer: yield {"event":"token","data":answer}

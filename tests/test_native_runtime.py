@@ -19,6 +19,72 @@ def test_native_tool_loop_persists_history_and_executes_skill(tmp_path, monkeypa
     assert any(m.get("role") == "tool" and "黄金三章" in m.get("content", "") for m in history)
 
 
+def test_provider_requests_enforce_cumulative_input_and_output_budgets_in_tool_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "STATE", tmp_path)
+    monkeypatch.setattr(runtime, "provider_config", lambda: ("https://api.openai.com/v1", "redacted-test-token", "gpt-4o-mini", "openai"))
+    replies=iter([
+        {"choices":[{"message":{"role":"assistant","content":None,"tool_calls":[{"id":"1","function":{"name":"read_skill","arguments":json.dumps({"skill":"novel-writer"})}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":120}},
+        {"choices":[{"message":{"role":"assistant","content":"先定下主角目标和转折。","tool_calls":[]}}],"usage":{"prompt_tokens":200,"completion_tokens":180}},
+    ])
+    requests=[]
+
+    class Response:
+        def __init__(self, data): self.data=data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+
+    def post(url, *, content, headers, timeout):
+        body=json.loads(content)
+        requests.append((url,body))
+        return Response(next(replies))
+
+    monkeypatch.setattr(runtime.httpx,"post",post)
+    agent=runtime.AgentRuntime(max_steps=4,max_completion_tokens=200,
+                               max_total_input_tokens=300000,max_total_output_tokens=300)
+    events=list(agent.run("给我一个小说写作方法", "budgeted-novel-session", allow_script_execution=False))
+    assert len(requests)==2
+    assert [body["max_completion_tokens"] for _,body in requests]==[200,180]
+    assert all(url=="https://api.openai.com/v1/chat/completions" for url,_ in requests)
+    assert events[-1]=={"event":"done","data":"budgeted-novel-session"}
+    # OpenAI's official gpt-4o-mini standard rates: $0.15/M input, $0.60/M output.
+    # Defaults reserve at most 300k conservative input tokens and 2,048 output tokens.
+    default_cost_bound=(300000*0.15 + 2048*0.60)/1_000_000
+    assert default_cost_bound < 0.10
+    hard_cost_bound=(400000*0.15 + 8192*0.60)/1_000_000
+    assert hard_cost_bound < 0.10
+    test_cost_bound=(300000*0.15 + 300*0.60)/1_000_000
+    assert test_cost_bound < 0.10
+
+
+def test_total_input_budget_stops_before_second_provider_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "STATE", tmp_path)
+    monkeypatch.setattr(runtime, "provider_config", lambda: ("https://api.openai.com/v1", "redacted-test-token", "gpt-4o-mini", "openai"))
+    initial_messages=[{"role":"system","content":runtime._system_prompt(None)},
+                      {"role":"user","content":"先读取小说写作技能"}]
+    first_body={"model":"gpt-4o-mini","messages":initial_messages,"tools":runtime.tool_schemas(script_execution=False),
+                "tool_choice":"auto","max_completion_tokens":512}
+    input_budget=runtime.AgentRuntime._input_token_upper_bound(
+        json.dumps(first_body,ensure_ascii=False,separators=(",",":")).encode("utf-8")) + 1
+    calls=[]
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices":[{"message":{"role":"assistant","content":None,"tool_calls":[{"id":"read","function":{"name":"read_skill","arguments":json.dumps({"skill":"novel-writer"})}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}
+
+    def post(url, *, content, headers, timeout):
+        calls.append(json.loads(content))
+        return Response()
+
+    monkeypatch.setattr(runtime.httpx,"post",post)
+    agent=runtime.AgentRuntime(max_completion_tokens=512,max_total_input_tokens=input_budget,
+                               max_total_output_tokens=2048)
+    events=list(agent.run("先读取小说写作技能", "input-budget-session", allow_script_execution=False))
+    assert len(calls)==1
+    assert "输入预算已用尽" in events[-2]["data"]
+    assert events[-1]=={"event":"done","data":"input-budget-session"}
+
+
 def test_tools_reject_traversal_and_overwrite(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "OUTPUTS", tmp_path / "outputs")
     runtime.OUTPUTS.mkdir()
@@ -223,7 +289,8 @@ def test_oversize_approval_payload_is_rejected_instead_of_truncated(tmp_path, mo
     monkeypatch.setattr(runtime, "_execute_registered_skill_script", lambda *a, **k: pytest.fail("oversize script must not run"))
     args = {"skill":"mock", "script":"run.py", "args":["x" * 1000, "TRAILING_SECRET_ARGUMENT"]}
     replies = iter([_tool_call("run_skill_script", args), {"choices":[{"message":{"role":"assistant","content":"Rejected safely.","tool_calls":[]}}]}])
-    events = list(runtime.AgentRuntime(request=lambda **_: next(replies)).run("run", "oversize-session"))
+    events = list(runtime.AgentRuntime(request=lambda **_: next(replies), max_completion_tokens=2048,
+                                       max_total_output_tokens=8192).run("run", "oversize-session"))
     assert not any(e["event"] == "question" for e in events)
     tool_result = next(m["content"] for m in runtime._load("oversize-session") if m.get("role") == "tool")
     assert "完整脚本参数无法放入审批卡" in tool_result
