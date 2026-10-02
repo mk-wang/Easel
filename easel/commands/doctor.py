@@ -28,8 +28,10 @@ def _env_configured():
     try:
         from easel.native_settings import load_config
         cfg = load_config()
+        from easel.runtime import _usable_credential
         primary = cfg.get("providers", {}).get(cfg.get("primary", ""), {})
-        if primary.get("baseUrl") and (primary.get("key") or values.get(primary.get("credentialEnv", ""))):
+        selected_key = str(primary.get("key") or values.get(primary.get("credentialEnv", ""), ""))
+        if primary.get("baseUrl") and _usable_credential(selected_key):
             return True
     except Exception:
         pass

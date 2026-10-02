@@ -206,7 +206,7 @@ export default function AccountsPage() {
     } finally {
       setBusy('');
     }
-  }, [stopPoll, runWhoami]);
+  }, [stopPoll, runWhoami, openCred]);
 
   // 公众号后台扫码登录（数据中心取数用，独立于 AppID 凭证）
   const handleMpLogin = useCallback(async (a: AccountItem) => {

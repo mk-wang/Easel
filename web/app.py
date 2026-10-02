@@ -2012,7 +2012,7 @@ async def api_chat(req: ChatRequest):
     message = _chat_message(req)
     session_id = req.sessionId or f"web-{int(time.time() * 1000)}"
     try:
-        events = await asyncio.to_thread(lambda: list(AgentRuntime().run(message, session_id, req.persona)))
+        events = await asyncio.to_thread(lambda: list(AgentRuntime().run(message, session_id, req.persona, allow_script_execution=False)))
     except RuntimeErrorBase as exc:
         raise HTTPException(503, str(exc)) from exc
     return {"response": "".join(e["data"] for e in events if e["event"] == "token")}
@@ -2033,7 +2033,7 @@ async def api_skill(req: SkillRequest):
     message = f"请先读取并完整遵循技能 {skill_full} 的 SKILL.md，按需读取 references，然后完成任务；写入的文本产物保存到 outputs/。\n\n{req.input}"
     session_id = f"skill-{uuid.uuid4().hex}"
     try:
-        events = await asyncio.to_thread(lambda: list(AgentRuntime().run(message, session_id, req.persona)))
+        events = await asyncio.to_thread(lambda: list(AgentRuntime().run(message, session_id, req.persona, allow_script_execution=False)))
     except RuntimeErrorBase as exc:
         raise HTTPException(503, str(exc)) from exc
     return {"response": "".join(e["data"] for e in events if e["event"] == "token")}
@@ -2950,9 +2950,15 @@ async def api_profile_build(req: ProfileBuildRequest):
     def _enhance() -> None:
         try:
             from easel.runtime import AgentRuntime
-            result = list(AgentRuntime().run(msg, f"profile-{name}", name))
+            profile_dir = PROFILES_DIR / name
+            before = {p.name: p.read_bytes() for p in profile_dir.glob("*.md")}
+            result = list(AgentRuntime().run(msg, f"profile-{name}", name, allow_profile_edit=True, allow_script_execution=False))
             log = "".join(item["data"] for item in result if item["event"] == "token")
-            _write_profile_status(name, 'done', log)
+            after = {p.name: p.read_bytes() for p in profile_dir.glob("*.md")}
+            if before == after:
+                _write_profile_status(name, 'failed', 'AI enhancement did not update any profile files; the baseline remains available.')
+            else:
+                _write_profile_status(name, 'done', log)
         except Exception as e:  # noqa: BLE001
             _write_profile_status(name, 'failed', f'AI 增强失败（基线画像已可用）：{e}')
 

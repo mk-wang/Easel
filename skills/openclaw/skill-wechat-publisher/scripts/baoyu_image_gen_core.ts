@@ -96,8 +96,10 @@ config.load_env()
 print(json.dumps({key: os.environ.get(key) for key in keys}))
 `.trim();
 
+  const pythonExecutable = process.env.EASEL_PYTHON || (process.env.VIRTUAL_ENV
+    ? path.join(process.env.VIRTUAL_ENV, "bin", "python3") : "python3");
   const result = Bun.spawnSync({
-    cmd: ["python3", "-c", python],
+    cmd: [pythonExecutable, "-c", python],
     cwd: SKILL_ROOT,
     env: process.env,
     stdout: "pipe",

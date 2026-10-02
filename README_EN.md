@@ -41,7 +41,7 @@
 
 ## 🎨 What Is Easel?
 
-Easel is an open-source content workspace for social media creators. It includes its own provider-backed text agent loop, account profiles, a library of content Skills, media utilities, and publishing workflows. The native agent can read Skills, create text artifacts, ask structured questions, and run a bounded novel-writer check; media generation and publishing remain user-operated workflows.
+Easel is an open-source content workspace for social media creators. It includes its own provider-backed text agent loop, account profiles, a library of content Skills, media utilities, and publishing workflows. The native agent can read Skills, create text artifacts, ask structured questions, run a bounded novel-writer check, and invoke registered Skill scripts after a per-run approval card.
 
 Use the Web workbench to manage accounts, content projects, publishing workflows, and profile data. The native text agent uses the selected profile and keeps its session history locally.
 
@@ -61,7 +61,7 @@ Easel organizes its product experience around five connected workflows: **Discov
 
 - **A native text agent:** read and follow content Skills, create non-overwriting text artifacts, retain session history, and use the selected profile.
 - **Profile-driven creation:** each account has its own positioning, style, audience, platforms, preferences, boundaries, and long-term memory.
-- **A broad Skill library:** Easel includes writing, media, safety, and publishing guidance. Media-generation and publishing scripts remain direct user-operated workflows; the native text agent does not launch arbitrary skill scripts.
+- **A broad Skill library:** Easel includes writing, media, safety, and publishing guidance. The native agent can launch registered media and publishing scripts only after an explicit per-run approval. It never exposes arbitrary shell commands.
 - **One source, many platforms:** adapt a single idea into Xiaohongshu cards, short video, a Zhihu article, or a short post while respecting platform conventions.
 - **Project-based outputs:** source material, intermediate files, metadata, and final deliverables stay together for revision, retrying, and publishing.
 - **Workbench publishing and analytics:** the existing account, publishing, calendar, and analytics pages remain available separately from the text agent loop.

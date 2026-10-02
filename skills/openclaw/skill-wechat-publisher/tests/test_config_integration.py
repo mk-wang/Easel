@@ -157,7 +157,7 @@ def test_bun_load_env_uses_skill_root_yaml_only(tmp_path):
     result = subprocess.run(
         ["bun", "--eval", code],
         cwd=tmp_path / "skill",
-        env={"PATH": os.environ["PATH"], "HOME": str(home_dir)},
+        env={"PATH": os.environ["PATH"], "HOME": str(home_dir), "EASEL_PYTHON": sys.executable},
         capture_output=True,
         text=True,
         check=True,
@@ -222,6 +222,7 @@ def test_bun_load_env_prefers_canonical_yaml_over_ambient_provider_env(tmp_path)
         env={
             "PATH": os.environ["PATH"],
             "HOME": str(tmp_path / "home"),
+            "EASEL_PYTHON": sys.executable,
             "GEMINI_PROXY_API_KEY": "ambient-proxy-key",
         },
         capture_output=True,

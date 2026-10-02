@@ -65,6 +65,21 @@ def cmd_chat(_args):
             for event in runtime.run(message,session_id=session,persona=selected):
                 if event["event"]=="token": print(event["data"],flush=True)
                 elif event["event"]=="activity": print(f"\n  · {event['data']}",flush=True)
+                elif event["event"]=="question":
+                    try:
+                        from easel.native_settings import answer_question
+                        card = __import__("json").loads(event["data"])
+                        answers = {}
+                        for item in card.get("questions", []):
+                            print(f"\n{item.get('header') or 'Easel'}: {item.get('question', '')}")
+                            options = item.get("options", [])
+                            for i, option in enumerate(options, 1): print(f"  {i}) {option.get('label', '')} — {option.get('description', '')}")
+                            choice = input("选择编号或输入自定义答案（回车取消）: ").strip()
+                            selected = options[int(choice)-1]["label"] if choice.isdigit() and 1 <= int(choice) <= len(options) else ([choice] if choice else ["取消"])
+                            answers[item["questionId"]] = selected
+                        answer_question(session, card["id"], answers)
+                    except (EOFError, KeyboardInterrupt):
+                        print("\n已取消。")
         except Exception as exc:  # provider/network failures should not dump a traceback
             print(f"{RED}请求失败：{exc}{NC}",file=sys.stderr)
 

@@ -323,7 +323,7 @@ Easel 原生运行时从本地 provider 配置读取聊天模型；媒体技能�
 | `easel ping` | 检查本地 provider 配置 |
 
 
-文本技能由 Easel 原生 agent loop 执行：按需读取 `SKILL.md` 和 references，创建文本产物并提供小说质量检查。媒体生成和公开发布暂由用户直接运行对应脚本。
+文本技能由 Easel 原生 agent loop 执行：按需读取 `SKILL.md` 和 references，创建文本产物并提供小说质量检查。媒体生成和公开发布技能可在交互聊天中逐次审批后运行对应脚本；Easel 不暴露通用 shell 命令。
 
 ```bash
 easel skill quality-gate -i "帮我检查这条小红书文案"
