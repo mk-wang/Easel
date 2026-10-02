@@ -75,8 +75,8 @@ def cmd_chat(_args):
                             options = item.get("options", [])
                             for i, option in enumerate(options, 1): print(f"  {i}) {option.get('label', '')} — {option.get('description', '')}")
                             choice = input("选择编号或输入自定义答案（回车取消）: ").strip()
-                            selected = options[int(choice)-1]["label"] if choice.isdigit() and 1 <= int(choice) <= len(options) else ([choice] if choice else ["取消"])
-                            answers[item["questionId"]] = selected
+                            answer_value = options[int(choice)-1]["label"] if choice.isdigit() and 1 <= int(choice) <= len(options) else ([choice] if choice else ["取消"])
+                            answers[item["questionId"]] = answer_value
                         answer_question(session, card["id"], answers)
                     except (EOFError, KeyboardInterrupt):
                         print("\n已取消。")

@@ -1,6 +1,6 @@
 """OpenClaw-independent Easel text agent runtime with bounded tools."""
 from __future__ import annotations
-import json, os, re, subprocess, sys
+import json, os, re, shutil, subprocess, sys, threading, time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 import httpx
@@ -81,11 +81,12 @@ def tool_schemas(*, profile_edit: bool = False, script_execution: bool = True):
     return [{"type":"function","function":{"name":n,"description":d,"parameters":{"type":"object","properties":p,"required":r,"additionalProperties":False}}} for n,d,p,r in specs]
 
 
-def _execute_registered_skill_script(skill: str, script: str, argv: Any) -> str:
-    """Execute only a concrete script below one registered skill after caller approval."""
+def _validate_registered_skill_script(skill: str, script: str, argv: Any) -> tuple[Path, Path, list[str]]:
+    """Validate a direct registered script and return its fixed argv command."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", skill): raise ValueError("invalid skill name")
     if not isinstance(argv, list) or len(argv) > 64 or any(not isinstance(a, str) or len(a) > 2000 for a in argv):
         raise ValueError("script arguments must be at most 64 strings of 2000 characters")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", script): raise ValueError("script must be a single safe filename")
     scripts_dir = _safe_under(SKILLS, skill) / "scripts"
     target = _safe_under(scripts_dir, script)
     if target.parent != scripts_dir.resolve() or not target.is_file(): raise ValueError("script is not registered under this skill")
@@ -93,13 +94,73 @@ def _execute_registered_skill_script(skill: str, script: str, argv: Any) -> str:
     elif target.suffix in {".js", ".mjs", ".cjs"}: command = ["node", str(target), *argv]
     elif target.suffix == ".ts": command = ["bun", str(target), *argv]
     else: raise ValueError("only registered Python, JavaScript and TypeScript scripts can run; shell scripts are disabled")
+    return scripts_dir, target, command
+
+
+def _signal_script_tree(proc: subprocess.Popen, *, force: bool = False) -> None:
+    """Stop the process group launched for a skill, including its child processes."""
+    if os.name == "posix":
+        import signal
+        try: os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError: pass
+        return
+    if not force:
+        taskkill = shutil.which("taskkill")
+        if taskkill:
+            subprocess.run([taskkill, "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+            return
+    try: proc.kill() if force else proc.terminate()
+    except OSError: pass
+
+
+def _execute_registered_skill_script(skill: str, script: str, argv: Any, cancel_event=None) -> str:
+    """Run a user-approved Skill script with bounded time and cancellation-aware child cleanup."""
+    if cancel_event is not None and cancel_event.is_set(): return "Script canceled before launch."
+    scripts_dir, _target, command = _validate_registered_skill_script(skill, script, argv)
+    if cancel_event is not None and cancel_event.is_set(): return "Script canceled before launch."
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "TMPDIR", "TEMP", "SYSTEMROOT", "LANG", "LC_ALL", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"} or k.startswith(("EASEL_", "OPENAI_", "ANTHROPIC_", "GEMINI_", "WECHAT_", "WECHATSYNC_", "XHS_", "BILIBILI_", "DOUYIN_", "VIDEO_", "VOICE_", "SILICONFLOW_", "MINERU_"))}
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     env["EASEL_ROOT"] = str(ROOT)
     env["EASEL_PYTHON"] = sys.executable
-    proc = subprocess.run(command, cwd=str(scripts_dir.parent), env=env, capture_output=True, text=True, timeout=180, check=False)
-    output = (proc.stdout or "") + (proc.stderr or "")
-    return (output or f"Script exited with code {proc.returncode}.")[:MAX_RESULT]
+    kwargs = {"cwd": str(scripts_dir.parent), "env": env, "stdout": subprocess.PIPE,
+              "stderr": subprocess.STDOUT, "text": True}
+    if os.name == "posix": kwargs["start_new_session"] = True
+    else: kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    # Check again immediately before the side-effect boundary.
+    if cancel_event is not None and cancel_event.is_set(): return "Script canceled before launch."
+    proc = subprocess.Popen(command, **kwargs)
+    result: list[tuple[str | None, str | None]] = []
+    def collect():
+        try: result.append(proc.communicate())
+        except Exception as exc: result.append((None, str(exc)))
+    worker = threading.Thread(target=collect, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 180
+    canceled = False
+    timed_out = False
+    while worker.is_alive():
+        if cancel_event is not None and cancel_event.is_set():
+            canceled = True; break
+        if time.monotonic() >= deadline:
+            timed_out = True; break
+        worker.join(0.05)
+    if canceled or timed_out:
+        _signal_script_tree(proc)
+        worker.join(1.5)
+        if worker.is_alive():
+            _signal_script_tree(proc, force=True)
+            worker.join(1.5)
+        # A direct child may exit while descendants keep the captured pipe open.
+        # In that case stop its process group before allowing the turn to finish.
+        if worker.is_alive() and os.name == "posix":
+            _signal_script_tree(proc, force=True)
+            worker.join(1)
+        if canceled: return "Script canceled; its process group was stopped."
+        raise subprocess.TimeoutExpired(command, 180)
+    if not result: return "Script finished without output."
+    stdout, error = result[0]
+    if error: return f"Script output collection failed: {error}"[:MAX_RESULT]
+    return (stdout or f"Script exited with code {proc.returncode}.")[:MAX_RESULT]
 
 
 def _update_profile_file(profile: str, filename: str, content: str) -> str:
@@ -259,9 +320,13 @@ class AgentRuntime:
                         result = "Script tools are disabled for this non-interactive runtime; use the interactive Easel chat to request approval."
                     elif name == "run_skill_script":
                         skill = str(args.get("skill", "")); script = str(args.get("script", "")); argv = args.get("args", [])
-                        args_summary = json.dumps(argv if isinstance(argv, list) else [], ensure_ascii=False)[:1000]
-                        options = [{"label": "运行一次", "description": "按以下参数运行。脚本可能读写文件、访问网络或调用外部服务。"}, {"label": "取消", "description": "不运行此脚本"}]
-                        question=create_question(session_id,[{"questionId":"approval","header":"脚本运行审批","question":f"技能脚本：{skill}/scripts/{script}\n参数：{args_summary}\n允许运行吗？", "options":options}])
+                        _validate_registered_skill_script(skill, script, argv)
+                        args_summary = json.dumps(argv, ensure_ascii=False, separators=(",", ":"))
+                        approval_text = f"技能脚本：{skill}/scripts/{script}\n参数：{args_summary}\n允许运行吗？"
+                        if len(approval_text) > 1000:
+                            raise ValueError("完整脚本参数无法放入审批卡，请缩短参数后重试；脚本未运行。")
+                        options = [{"label": "运行一次", "description": "按以上完整参数运行。脚本可能读写文件、访问网络或调用外部服务。"}, {"label": "取消", "description": "不运行此脚本"}]
+                        question=create_question(session_id,[{"questionId":"approval","header":"脚本运行审批","question":approval_text, "options":options}])
                         yield {"event":"question","data":json.dumps(question,ensure_ascii=False)}
                         deadline=__import__("time").monotonic()+300; state=None
                         while __import__("time").monotonic()<deadline:
@@ -271,7 +336,7 @@ class AgentRuntime:
                             __import__("time").sleep(0.25)
                         decision=(state or {}).get("answers",{}).get("approval", [])
                         if decision != ["运行一次"]: result="脚本运行已取消或审批超时。"
-                        else: result=_execute_registered_skill_script(skill,script,argv)
+                        else: result=_execute_registered_skill_script(skill,script,argv,cancel_event=cancel_event)
                     elif name == "update_profile_file" and allow_profile_edit and persona:
                         result=_update_profile_file(persona, str(args.get("file", "")), str(args.get("content", "")))
                     else:

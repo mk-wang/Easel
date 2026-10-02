@@ -125,12 +125,14 @@ def test_registered_media_script_runs_only_after_explicit_approval(tmp_path, mon
     monkeypatch.setattr(runtime, "SKILLS", tmp_path / "skills")
     monkeypatch.setattr(native_settings, "create_question", lambda sid, qs: {"id": "approval-1", "sessionId": sid, "questions": qs, "status": "pending"})
     monkeypatch.setattr(native_settings, "get_question", lambda sid, qid: {"id": qid, "status": "resolved", "answers": {"approval": ["运行一次"]}})
-    replies = iter([_tool_call("run_skill_script", {"skill":"mock-media", "script":"render.py", "args":[]}),
+    replies = iter([_tool_call("run_skill_script", {"skill":"mock-media", "script":"render.py", "args":["--mock", "visible-tail"]}),
                     {"choices":[{"message":{"role":"assistant","content":"Rendered mock media.","tool_calls":[]}}]}])
     events = list(runtime.AgentRuntime(request=lambda **_: next(replies)).run("render", "approval-session"))
     approval = next(json.loads(e["data"]) for e in events if e["event"] == "question")
-    assert "render.py" in approval["questions"][0]["question"]
-    assert "MOCK_MEDIA" not in approval["questions"][0]["question"]
+    approval_text = approval["questions"][0]["question"]
+    assert "render.py" in approval_text
+    assert "visible-tail" in approval_text
+    assert "MOCK_MEDIA" not in approval_text
     history = runtime._load("approval-session")
     assert any("MOCK_MEDIA_RENDER_OK" in m.get("content", "") for m in history if m.get("role") == "tool")
 
@@ -209,3 +211,91 @@ def test_profile_build_uses_scoped_profile_tool_and_marks_done_after_change(tmp_
             time.sleep(0.02)
         assert status["state"] == "done", status
     assert (profile_root / "writer" / "style.md").read_text(encoding="utf-8") == "AI-enhanced style"
+
+
+def test_oversize_approval_payload_is_rejected_instead_of_truncated(tmp_path, monkeypatch):
+    from easel import native_settings
+    monkeypatch.setattr(runtime, "STATE", tmp_path / "state")
+    skill = tmp_path / "skills" / "mock"; (skill / "scripts").mkdir(parents=True)
+    (skill / "scripts" / "run.py").write_text("print('should not run')", encoding="utf-8")
+    monkeypatch.setattr(runtime, "SKILLS", tmp_path / "skills")
+    monkeypatch.setattr(native_settings, "create_question", lambda *a: pytest.fail("oversize approval must not be displayed"))
+    monkeypatch.setattr(runtime, "_execute_registered_skill_script", lambda *a, **k: pytest.fail("oversize script must not run"))
+    args = {"skill":"mock", "script":"run.py", "args":["x" * 1000, "TRAILING_SECRET_ARGUMENT"]}
+    replies = iter([_tool_call("run_skill_script", args), {"choices":[{"message":{"role":"assistant","content":"Rejected safely.","tool_calls":[]}}]}])
+    events = list(runtime.AgentRuntime(request=lambda **_: next(replies)).run("run", "oversize-session"))
+    assert not any(e["event"] == "question" for e in events)
+    tool_result = next(m["content"] for m in runtime._load("oversize-session") if m.get("role") == "tool")
+    assert "完整脚本参数无法放入审批卡" in tool_result
+
+
+def test_script_runner_cancel_before_launch_does_not_spawn(tmp_path, monkeypatch):
+    import threading
+    root = tmp_path / "skills"; scripts = root / "mock" / "scripts"; scripts.mkdir(parents=True)
+    marker = tmp_path / "ran"
+    (scripts / "run.py").write_text(f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')", encoding="utf-8")
+    monkeypatch.setattr(runtime, "SKILLS", root)
+    event = threading.Event(); event.set()
+    result = runtime._execute_registered_skill_script("mock", "run.py", [], cancel_event=event)
+    assert "before launch" in result
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="process-group child cleanup is validated on POSIX")
+def test_script_runner_cancellation_stops_child_process_tree(tmp_path, monkeypatch):
+    import os
+    import threading
+    import time
+    root = tmp_path / "skills"; scripts = root / "mock" / "scripts"; scripts.mkdir(parents=True)
+    pid_file = tmp_path / "child.pid"; marker = tmp_path / "child-terminated"; ready = tmp_path / "child-ready"
+    child_code = ("import pathlib,signal,sys,time; p=pathlib.Path(sys.argv[1]); ready=pathlib.Path(sys.argv[2]); "
+                  "signal.signal(signal.SIGTERM,lambda *_:p.write_text('terminated')); ready.write_text('ready'); time.sleep(30)")
+    script = scripts / "run.py"
+    script.write_text("import subprocess,sys,time,pathlib\n"
+                      f"child=subprocess.Popen([sys.executable,'-c',{child_code!r},{str(marker)!r},{str(ready)!r}])\n"
+                      f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+                      "time.sleep(30)\n", encoding="utf-8")
+    from easel import native_settings
+    monkeypatch.setattr(runtime, "SKILLS", root)
+    monkeypatch.setattr(runtime, "STATE", tmp_path / "state")
+    monkeypatch.setattr(native_settings, "create_question", lambda sid, qs: {"id":"q-cancel", "sessionId":sid, "questions":qs, "status":"pending"})
+    monkeypatch.setattr(native_settings, "get_question", lambda sid, qid: {"id":qid, "status":"resolved", "answers":{"approval":["运行一次"]}})
+    cancel = threading.Event(); events = []
+    replies = iter([_tool_call("run_skill_script", {"skill":"mock", "script":"run.py", "args":[]}),
+                    {"choices":[{"message":{"role":"assistant", "content":"done", "tool_calls":[]}}]}])
+    agent = runtime.AgentRuntime(request=lambda **_: next(replies))
+    worker = threading.Thread(target=lambda: events.extend(agent.run("run", "tree-cancel", cancel_event=cancel)))
+    worker.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not pid_file.exists(): time.sleep(0.02)
+    assert pid_file.is_file(), "mock child never started"
+    child_pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists(): time.sleep(0.02)
+    assert ready.is_file(), "mock child did not install its termination handler"
+    cancel.set(); worker.join(timeout=5)
+    assert not worker.is_alive(), "cancel did not return promptly"
+    assert any(e.get("event") == "token" and "已停止" in e.get("data", "") for e in events)
+    assert any("canceled" in m.get("content", "").lower() for m in runtime._load("tree-cancel") if m.get("role") == "tool")
+    assert marker.read_text() == "terminated"
+    with pytest.raises(ProcessLookupError): os.kill(child_pid, 0)
+
+
+def test_cli_question_answer_does_not_replace_selected_persona(monkeypatch, capsys):
+    import builtins
+    from easel import cli
+    from easel.native_settings import create_question
+    monkeypatch.setattr(cli, "_list_personas", lambda: ["writer"])
+    inputs = iter(["1", "first turn", "1", "second turn", "/quit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+    seen = []
+    class FakeAgent:
+        def run(self, message, session_id, persona=None, **kwargs):
+            seen.append((message, persona))
+            if message == "first turn":
+                card = create_question(session_id, [{"questionId":"continue", "question":"Continue?", "options":[{"label":"继续"}, {"label":"取消"}]}])
+                yield {"event":"question", "data":json.dumps(card,ensure_ascii=False)}
+            yield {"event":"token", "data":"ok"}
+    monkeypatch.setattr("easel.runtime.AgentRuntime", FakeAgent)
+    assert cli.cmd_chat(None) == 0
+    assert seen == [("first turn", "writer"), ("second turn", "writer")]
